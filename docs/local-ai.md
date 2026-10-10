@@ -19,3 +19,7 @@ WebView передаёт для объяснения только идентиф
 - llama.cpp / ggml: MIT, [лицензия](https://github.com/ggml-org/llama.cpp/blob/master/LICENSE).
 
 Полная приёмка Windows на личном ПК, утечки DNS/IPv6, сон/смена сети и сертификаты издателя остаются отдельными задачами. ИИ-помощник не меняет эти границы готовности.
+
+## Сборка из исходников
+
+Для сборки встроенного движка дополнительно нужны CMake, C++-компилятор и libclang. На проверенном Mac использованы Command Line Tools и CMake; `LIBCLANG_PATH` указывает на `/Library/Developer/CommandLineTools/usr/lib`. Это требования к разработчику, готовое приложение не требует установки этих инструментов. На Windows CI используется MSVC/LLVM, `LLAMA_STATIC_CRT=1` и `RUSTFLAGS=-C target-feature=+crt-static`, чтобы клиент не зависел от отдельно установленного C++ runtime.
