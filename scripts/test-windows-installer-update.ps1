@@ -14,7 +14,9 @@ try {
     $profile = Join-Path $profileRoot 'profile.enc'
     [IO.File]::WriteAllBytes($profile, [Text.Encoding]::UTF8.GetBytes('preserved-test-profile'))
     $profileHash = (Get-FileHash $profile -Algorithm SHA256).Hash
-    $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/kvashninsasha-gif/foxVPN/releases/tags/v0.1.19'
+    $headers = @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'foxVPN-release-verification' }
+    if ($env:GITHUB_TOKEN) { $headers.Authorization = "Bearer $env:GITHUB_TOKEN" }
+    $release = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/kvashninsasha-gif/foxVPN/releases/tags/v0.1.19'
     $asset = $release.assets | Where-Object name -eq 'foxVPN_0.1.19_x64-setup.exe'
     if (-not $asset -or -not $asset.digest.StartsWith('sha256:')) { throw 'Pinned old release missing' }
     $oldInstaller = Join-Path $taskRoot 'old.exe'

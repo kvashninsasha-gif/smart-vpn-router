@@ -75,6 +75,7 @@ jobs:
           ./scripts/test-windows-installer-update.ps1 -Installer $installer -ExpectedVersion $version
         env:
           FOXVPN_TEST_ALLOW_INSTALLER: "1"
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Record artifact checksums
         shell: pwsh
         run: |
