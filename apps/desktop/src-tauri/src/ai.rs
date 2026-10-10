@@ -450,6 +450,17 @@ pub async fn ai_explain(
         if state.installing.load(Ordering::SeqCst) || stamp(&state)? != current {
             return Err("Состояние изменилось во время ответа. Повторите проверку".into());
         }
+        {
+            let latest = ai
+                .check
+                .lock()
+                .map_err(|_| "Не удалось проверить актуальность ответа")?;
+            checked_facts(
+                latest.as_ref().ok_or("Повторите проверку подключения")?,
+                &check_id,
+                &current,
+            )?;
+        }
         Ok(Explanation {
             text,
             advice: facts.action.advice(),

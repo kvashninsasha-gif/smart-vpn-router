@@ -49,7 +49,7 @@ export function LocalAssistant({report,locked=false}:{report:SetupReport|null;lo
   </div>
   {info?.available&&!report&&<p className="footnote">Сначала нажмите «Проверить и настроить».</p>}
   {downloading&&<div role="status"><progress aria-label="Загрузка модели" value={Math.min(count,total)} max={total}/><p>{stage==='verify'?'Проверяем модель…':`Скачано ${Math.round(count/1000000)} из ${Math.round(total/1000000)} МБ`}</p></div>}
-  {running&&!downloading&&<p role="status">Помощник готовит объяснение. Подключение VPN продолжает работать.</p>}
+  {running&&!downloading&&<p role="status">Помощник готовит объяснение…</p>}
   {message&&<p role="status">{message}</p>}
   {answer&&<div className="ai-answer" aria-live="polite"><b>Объяснение ИИ</b><p className="ai-text">{answer.text}</p>
    <p className="footnote">Ответ модели может быть неточным. Она не изменяла настройки.</p><b>Проверенный следующий шаг</b><p>{answer.advice}</p></div>}
