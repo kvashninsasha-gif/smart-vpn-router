@@ -17,7 +17,7 @@ it('Windows repair requires explicit confirmation and cancel makes no changes',a
  fireEvent.click(screen.getByRole('button',{name:'Настроить Windows автоматически'}));
  fireEvent.click(screen.getByRole('button',{name:'Подтвердить настройку'}));
  await waitFor(()=>expect(action).toHaveBeenCalledWith('windows_proxy',expect.objectContaining({selected:'test'})));
- expect(ipc.invoke.mock.calls.map(([command])=>command)).toEqual(['ai_state','setup_check']);
+ expect(ipc.invoke.mock.calls.map(([command])=>command)).toEqual(['ai_state','snapshot','setup_check']);
 });
 it('macOS installer is offered as a consented action, never started by the check',async()=>{
  ipc.invoke.mockResolvedValue({...report,action:'helper'});const action=vi.fn(async()=>{});render(<SetupAssistant onAction={action}/>);

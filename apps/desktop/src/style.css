@@ -43,3 +43,5 @@ header{position:sticky;top:0;z-index:10}
 .ai-answer{margin-top:16px;padding:16px;border-radius:12px;border:1px solid #dfe5ee}.ai-text{white-space:pre-wrap;overflow-wrap:anywhere}
 
 [data-theme=dark] .local-assistant,[data-theme=dark] .ai-answer{background:#15202c;border-color:#46556b}
+
+.configuration-assistant{margin:20px 0;padding:18px;border:1px solid #dfe5ee;border-radius:14px}.configuration-assistant h4{margin:0 0 10px}.configuration-assistant>label{display:block;margin:10px 0}.configuration-assistant details{margin:14px 0}.configuration-assistant summary{cursor:pointer;font-weight:600}.configuration-assistant textarea{display:block;width:100%;min-height:100px;margin-top:8px}.configuration-assistant li{margin:8px 0;line-height:1.6}[data-theme=dark] .configuration-assistant{border-color:#46556b}

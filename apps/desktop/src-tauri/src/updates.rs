@@ -127,6 +127,19 @@ pub struct Info {
 pub fn exit_allowed(installing: bool, code: Option<i32>) -> bool {
     !installing || code == Some(tauri::RESTART_EXIT_CODE)
 }
+async fn mark_installing(state: &crate::State) -> Result<(), String> {
+    let state = state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _gate = state
+            .gate
+            .lock()
+            .map_err(|_| "Не удалось дождаться настройки")?;
+        state.installing.store(true, Ordering::SeqCst);
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Не удалось начать установку")?
+}
 #[tauri::command]
 pub async fn update_state(
     app: tauri::AppHandle,
@@ -340,6 +353,12 @@ pub async fn install_app_update(
     if !approved {
         return Err("Обновление требует вашего согласия.".into());
     }
+    if app
+        .try_state::<crate::setup_plan::Plans>()
+        .is_some_and(|p| p.is_busy())
+    {
+        return Err("Дождитесь завершения настройки помощником".into());
+    }
     let _busy = updates.acquire()?;
     #[cfg(target_os = "macos")]
     {
@@ -458,7 +477,7 @@ pub async fn install_app_update(
         };
         next.skipped_version = None;
         updates.write(&next)?;
-        vpn.installing.store(true, Ordering::SeqCst);
+        mark_installing(&vpn).await?;
         let _ = app.emit(
             "app-update-progress",
             Progress {
@@ -607,7 +626,7 @@ async fn install_windows(
     next.skipped_version = None;
     next.pending_version = None;
     updates.write(&next)?;
-    vpn.installing.store(true, Ordering::SeqCst);
+    mark_installing(&vpn).await?;
     let state = vpn.clone();
     let stopped = tauri::async_runtime::spawn_blocking(move || {
         let profile = state

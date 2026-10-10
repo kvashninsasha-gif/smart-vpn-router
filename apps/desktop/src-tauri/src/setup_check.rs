@@ -4,19 +4,19 @@ use serde::Serialize;
 use smart_vpn_engine::{latency, network_helper, servers::Server};
 use tauri::Emitter;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Item {
     pub(crate) label: &'static str,
     pub(crate) ok: bool,
     message: String,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Candidate {
     id: String,
     name: String,
     latency_ms: u64,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Report {
     pub(crate) items: Vec<Item>,
     pub(crate) action: &'static str,
@@ -26,6 +26,8 @@ pub struct Report {
     pub(crate) total: usize,
     changed: bool,
     pub(crate) check_id: String,
+    #[serde(skip)]
+    pub(crate) verified: Vec<Server>,
 }
 #[allow(clippy::too_many_arguments)]
 fn action(
@@ -177,8 +179,11 @@ pub async fn setup_check(
         let next = if changed { "none" } else { action(core, server, active, profile.settings.tun, helper,
             cfg!(windows), proxy_matches, healthy) };
         let report = Report { items, action: next, selected: latest.selected, recommendation, tested,
-            total: profile.servers.len(), changed, check_id: if changed { String::new() } else { uuid::Uuid::new_v4().to_string() } };
-        if !changed { super::ai::remember(&app, &report, initial_stamp)?; }
+            total: profile.servers.len(), changed, check_id: if changed { String::new() } else { uuid::Uuid::new_v4().to_string() }, verified: successes };
+        if !changed {
+            super::ai::remember(&app, &report, initial_stamp.clone())?;
+            super::setup_plan::remember(&app, &report, initial_stamp)?;
+        }
         Ok(report)
     }).await.map_err(|_| "Не удалось завершить проверку")?
 }
@@ -201,6 +206,7 @@ pub(crate) fn private_fixture_report() -> Report {
         total: 200,
         changed: false,
         check_id: "public-check".into(),
+        verified: vec![],
     }
 }
 #[cfg(test)]

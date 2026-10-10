@@ -8,6 +8,7 @@ mod metrics;
 #[cfg(any(target_os = "macos", test))]
 mod network_cli;
 mod setup_check;
+mod setup_plan;
 #[cfg(target_os = "macos")]
 mod update_install;
 mod updates;
@@ -428,6 +429,9 @@ fn disconnect(s: &State) -> Result<(), String> {
 }
 fn disconnect_for_ticket(s: &State, ticket: u64) -> Result<(), String> {
     let _guard = s.gate.lock().unwrap();
+    disconnect_locked(s, ticket)
+}
+fn disconnect_locked(s: &State, ticket: u64) -> Result<(), String> {
     if !s.wanted.current(ticket) {
         return Err(smart_vpn_engine::text("connection_cancelled").into());
     }
@@ -482,6 +486,9 @@ fn disconnect_for_ticket(s: &State, ticket: u64) -> Result<(), String> {
 
 fn connect_for_ticket(s: &State, ticket: u64, manual: bool) -> Result<u16, String> {
     let _guard = s.gate.lock().unwrap();
+    finish_connect_locked(s, ticket, manual)
+}
+fn finish_connect_locked(s: &State, ticket: u64, manual: bool) -> Result<u16, String> {
     if !s.wanted.current(ticket) {
         return Err(smart_vpn_engine::text("connection_cancelled").into());
     }
@@ -1034,6 +1041,7 @@ fn main() {
             }
             app.manage(state.clone());
             app.manage(ai::Assistant::default());
+            app.manage(setup_plan::Plans::default());
             metrics::start(state.clone(), app.handle().clone());
             let show = MenuItem::with_id(app, "show", t("open_app"), true, None::<&str>)?;
             let connect = MenuItem::with_id(app, "connect", t("connect"), true, None::<&str>)?;
@@ -1252,6 +1260,9 @@ fn main() {
             open_windows_proxy_settings,
             diagnostics::connection_diagnostics,
             setup_check::setup_check,
+            setup_plan::prepare_setup_plan,
+            setup_plan::apply_setup_plan,
+            setup_plan::undo_setup_plan,
             ai::ai_state,
             ai::ai_download,
             ai::ai_cancel,
