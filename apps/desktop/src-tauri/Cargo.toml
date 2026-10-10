@@ -1,6 +1,6 @@
 [package]
 name = "smart-vpn-desktop"
-version = "0.1.26"
+version = "0.1.27"
 edition = "2021"
 license = "GPL-3.0-only"
 [build-dependencies]
@@ -33,6 +33,7 @@ plist = "1"
 libc = "0.2"
 
 [dev-dependencies]
+smart-vpn-engine = {path="../../..", features=["test-support"]}
 tempfile = "3"
 tauri = {version="2", features= ["test"] }
 

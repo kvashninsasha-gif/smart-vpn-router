@@ -9,7 +9,7 @@ use smart_vpn_engine::{
 use std::{
     net::TcpListener,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -85,7 +85,6 @@ struct Check {
 }
 struct Draft {
     id: String,
-    before: Profile,
     after: Profile,
     stamp: String,
     time: Instant,
@@ -106,10 +105,14 @@ pub struct Plans {
     draft: Arc<Mutex<Option<Draft>>>,
     undo: Arc<Mutex<Option<Undo>>>,
     busy: Arc<AtomicBool>,
+    operation: Arc<AtomicU8>,
+    cancel: Arc<Mutex<bool>>,
+    operation_id: Arc<Mutex<String>>,
 }
 struct Busy(Plans);
 impl Drop for Busy {
     fn drop(&mut self) {
+        self.0.operation.store(0, Ordering::SeqCst);
         self.0.busy.store(false, Ordering::SeqCst);
     }
 }
@@ -129,11 +132,41 @@ impl Plans {
     pub(crate) fn is_busy(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
     }
-    fn acquire(&self) -> Result<Busy, String> {
+    fn request_cancel(&self, operation_id: &str) -> Result<(), String> {
+        let mut cancel = self
+            .cancel
+            .lock()
+            .map_err(|_| "Не удалось запросить отмену")?;
+        if !self.is_busy()
+            || !matches!(self.operation.load(Ordering::SeqCst), 2 | 3)
+            || self
+                .operation_id
+                .lock()
+                .map_err(|_| "Настройка недоступна")?
+                .as_str()
+                != operation_id
+        {
+            return Err("Настройка ещё не началась или уже завершилась".into());
+        }
+        *cancel = true;
+        Ok(())
+    }
+    fn acquire(&self, operation: u8, operation_id: &str) -> Result<Busy, String> {
         self.busy
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| "Настройка уже выполняется")?;
-        Ok(Busy(self.clone()))
+        let guard = Busy(self.clone());
+        let mut cancel = self
+            .cancel
+            .lock()
+            .map_err(|_| "Не удалось начать настройку")?;
+        *cancel = false;
+        *self
+            .operation_id
+            .lock()
+            .map_err(|_| "Не удалось начать настройку")? = operation_id.into();
+        self.operation.store(operation, Ordering::SeqCst);
+        Ok(guard)
     }
 }
 #[derive(Clone, Serialize)]
@@ -143,6 +176,8 @@ pub struct Plan {
     steps: Vec<String>,
     blockers: Vec<String>,
     reconnect: bool,
+    scope: String,
+    rule_changes: Vec<RuleChange>,
 }
 #[derive(Serialize)]
 pub struct Outcome {
@@ -163,22 +198,94 @@ pub fn remember(app: &tauri::AppHandle, report: &Report, stamp: String) -> Resul
     Ok(())
 }
 fn configured(p: &Profile) -> Result<String, String> {
-    // Names and measurements do not invalidate undo; configuration and server credentials do.
-    let servers: Vec<_> = p
-        .servers
-        .iter()
-        .map(|s| Ok((&s.id, s.uri()?)))
-        .collect::<Result<_, String>>()?;
-    let bytes = serde_json::to_vec(&(
-        &p.settings,
-        &p.selected,
-        &p.rules,
-        servers,
-        &p.subscriptions,
-    ))
-    .map_err(|_| "Не удалось проверить настройки")?;
-    use sha2::{Digest, Sha256};
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    smart_vpn_engine::settings::configuration_digest(p)
+}
+/// A plan changes configuration, never overwrites newer measurements or
+/// subscription timestamps. Credentials/identity must still match for copying.
+fn with_observations(desired: &Profile, latest: &Profile) -> Result<Profile, String> {
+    let mut target = desired.clone();
+    let observations: std::collections::HashMap<_, _> =
+        latest.servers.iter().map(|s| (s.id.as_str(), s)).collect();
+    for server in &mut target.servers {
+        if let Some(current) = observations.get(server.id.as_str()) {
+            if server.uri()? == current.uri()? {
+                server.latency_ms = current.latency_ms;
+                server.download_mbps = current.download_mbps;
+                server.status = current.status.clone();
+                server.successes = current.successes;
+                server.failures = current.failures;
+                server.last_error = current.last_error.clone();
+            }
+        }
+    }
+    for sub in &mut target.subscriptions {
+        if let Some(current) = latest
+            .subscriptions
+            .iter()
+            .find(|s| s.id == sub.id && s.url == sub.url)
+        {
+            sub.updated_at = current.updated_at;
+            sub.server_count = current.server_count;
+        }
+    }
+    Ok(target)
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct RuleChange {
+    domain: String,
+    previous_route: Option<String>,
+    next_route: Option<String>,
+    previous_position: Option<usize>,
+    next_position: Option<usize>,
+}
+fn rule_key(rule: &Rule) -> Result<String, String> {
+    let wildcard = rule.domain.starts_with("*.");
+    let domain = routing::normalize(rule.domain.strip_prefix("*.").unwrap_or(&rule.domain))?;
+    Ok(if wildcard {
+        format!("*.{domain}")
+    } else {
+        domain
+    })
+}
+fn rule_changes(before: &[Rule], after: &[Rule]) -> Result<Vec<RuleChange>, String> {
+    use std::collections::BTreeMap;
+    let map = |rules: &[Rule]| -> Result<BTreeMap<String, (usize, String)>, String> {
+        rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| Ok((rule_key(r)?, (i + 1, r.route.clone()))))
+            .collect()
+    };
+    let old = map(before)?;
+    let new = map(after)?;
+    let mut result = vec![];
+    // Keep the displayed order aligned with the effective priority of new rules.
+    for (i, rule) in after.iter().enumerate() {
+        let domain = rule_key(rule)?;
+        let prior = old.get(&domain);
+        if prior.is_none_or(|(position, route)| *position != i + 1 || route != &rule.route) {
+            result.push(RuleChange {
+                domain,
+                previous_route: prior.map(|v| v.1.clone()),
+                next_route: Some(rule.route.clone()),
+                previous_position: prior.map(|v| v.0),
+                next_position: Some(i + 1),
+            });
+        }
+    }
+    for (i, rule) in before.iter().enumerate() {
+        let domain = rule_key(rule)?;
+        if !new.contains_key(&domain) {
+            result.push(RuleChange {
+                domain,
+                previous_route: Some(rule.route.clone()),
+                next_route: None,
+                previous_position: Some(i + 1),
+                next_position: None,
+            });
+        }
+    }
+    Ok(result)
 }
 fn free_port(preferred: u16, owned: Option<u16>) -> Result<u16, String> {
     if owned == Some(preferred) || TcpListener::bind(("127.0.0.1", preferred)).is_ok() {
@@ -275,6 +382,7 @@ fn build(
     after.settings.proxy_port = free_port(after.settings.proxy_port, owned_port)?;
     after.validate()?;
     let mut changes = changed_settings(&before.settings, &after.settings);
+    let rule_changes = rule_changes(&before.rules, &after.rules)?;
     if before.selected != after.selected {
         let name = after
             .servers
@@ -317,6 +425,14 @@ fn build(
     {
         steps.push("При подключении включить прокси Windows. Прежние параметры будут сохранены и восстановлены при отключении".into());
     }
+    let scope = if windows {
+        "Локальный прокси Windows: только совместимые приложения"
+    } else if after.settings.tun {
+        "Системный VPN всего Mac"
+    } else {
+        "Локальный прокси Mac: только настроенные приложения"
+    }
+    .to_string();
     Ok((
         after,
         Plan {
@@ -325,6 +441,8 @@ fn build(
             steps,
             blockers,
             reconnect,
+            scope,
+            rule_changes,
         },
     ))
 }
@@ -339,7 +457,7 @@ pub async fn prepare_setup_plan(
     let plans = plans.inner().clone();
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _busy = plans.acquire()?;
+        let _busy = plans.acquire(1, &check_id)?;
         let _gate = state.gate.lock().map_err(|_| "Настройки заняты")?;
         if state.installing.load(Ordering::SeqCst) {
             return Err("Дождитесь обновления приложения".into());
@@ -394,7 +512,6 @@ pub async fn prepare_setup_plan(
             .lock()
             .map_err(|_| "Не удалось сохранить план")? = Some(Draft {
             id: view.id.clone(),
-            before,
             after,
             stamp,
             time: Instant::now(),
@@ -418,6 +535,13 @@ trait Backend {
     fn save(&mut self, p: &Profile) -> Result<(), String>;
     fn start(&mut self) -> Result<(), String>;
     fn verify(&mut self) -> Result<(), String>;
+    fn complete(&mut self) -> Result<(), String> {
+        if self.current() {
+            Ok(())
+        } else {
+            Err("Действие отменено".into())
+        }
+    }
 }
 /// Every failed stage restores configuration; restoration failure is reported explicitly.
 fn transact(
@@ -452,10 +576,7 @@ fn transact(
             }
             b.verify()?;
         }
-        if !b.current() {
-            return Err("Действие отменено".into());
-        }
-        Ok(())
+        b.complete()
     })();
     if let Err(error) = result {
         if !touched {
@@ -483,13 +604,43 @@ fn transact(
     }
     Ok(())
 }
+fn verify_proxy_port(port: u16, url: &str) -> Result<(), String> {
+    let ok = latency::client(port)?
+        .get(url)
+        .send()
+        .map(|r| r.status().as_u16() == 204)
+        .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err("Контрольный запрос через подключение не прошёл".into())
+    }
+}
 struct Live<'a> {
     state: &'a State,
+    plans: &'a Plans,
     ticket: u64,
 }
 impl Backend for Live<'_> {
     fn current(&self) -> bool {
-        self.state.wanted.current(self.ticket) && !self.state.installing.load(Ordering::SeqCst)
+        self.plans.cancel.lock().is_ok_and(|cancel| !*cancel)
+            && self.state.wanted.current(self.ticket)
+            && !self.state.installing.load(Ordering::SeqCst)
+    }
+    fn complete(&mut self) -> Result<(), String> {
+        let cancel = self
+            .plans
+            .cancel
+            .lock()
+            .map_err(|_| "Не удалось завершить настройку")?;
+        if *cancel
+            || !self.state.wanted.current(self.ticket)
+            || self.state.installing.load(Ordering::SeqCst)
+        {
+            return Err("Действие отменено".into());
+        }
+        self.plans.operation.store(0, Ordering::SeqCst);
+        Ok(())
     }
     fn stop(&mut self) -> Result<(), String> {
         super::disconnect_locked(self.state, self.state.wanted.ticket())
@@ -522,14 +673,7 @@ impl Backend for Live<'_> {
             .as_ref()
             .map(|c| c.proxy_port)
             .ok_or("Подключение не запущено")?;
-        let ok = latency::client(port)?
-            .get("https://www.gstatic.com/generate_204")
-            .send()
-            .map(|r| r.status().as_u16() == 204)
-            .unwrap_or(false);
-        if !ok {
-            return Err("Контрольный HTTPS-запрос не прошёл".into());
-        }
+        verify_proxy_port(port, "https://www.gstatic.com/generate_204")?;
         #[cfg(windows)]
         if self
             .state
@@ -571,6 +715,13 @@ impl Backend for Live<'_> {
     }
 }
 #[tauri::command]
+pub fn cancel_setup_plan(
+    plans: tauri::State<'_, Plans>,
+    operation_id: String,
+) -> Result<(), String> {
+    plans.request_cancel(&operation_id)
+}
+#[tauri::command]
 pub async fn apply_setup_plan(
     app: tauri::AppHandle,
     plans: tauri::State<'_, Plans>,
@@ -584,7 +735,7 @@ pub async fn apply_setup_plan(
     let plans = plans.inner().clone();
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _busy = plans.acquire()?;
+        let _busy = plans.acquire(2, &plan_id)?;
         let _measure = state
             .measurements
             .lock()
@@ -617,6 +768,12 @@ pub async fn apply_setup_plan(
         if free_port(draft.after.settings.proxy_port, owned)? != draft.after.settings.proxy_port {
             return Err("Порт заняли после подготовки плана. Подготовьте новый план".into());
         }
+        let before = state
+            .profile
+            .lock()
+            .map_err(|_| "Не удалось прочитать настройки")?
+            .clone();
+        let after = with_observations(&draft.after, &before)?;
         let ticket = state.wanted.request()?;
         let _ = app.emit(
             "setup-plan-progress",
@@ -625,10 +782,11 @@ pub async fn apply_setup_plan(
         let result = transact(
             &mut Live {
                 state: &state,
+                plans: &plans,
                 ticket,
             },
-            &draft.before,
-            &draft.after,
+            &before,
+            &after,
             draft.active,
             draft.view.reconnect,
             draft.connect,
@@ -657,8 +815,8 @@ pub async fn apply_setup_plan(
             .lock()
             .map_err(|_| "Не удалось сохранить возврат настроек")? = Some(Undo {
             id: id.clone(),
-            before: draft.before,
-            applied: configured(&draft.after)?,
+            before,
+            applied: configured(&after)?,
             ticket,
             active: draft.active,
         });
@@ -692,7 +850,7 @@ pub async fn undo_setup_plan(
     let plans = plans.inner().clone();
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _busy=plans.acquire()?;let _measure=state.measurements.lock().map_err(|_|"Дождитесь проверки")?;let _gate=state.gate.lock().map_err(|_|"Настройки заняты")?;
+        let _busy=plans.acquire(3, &undo_id)?;let _measure=state.measurements.lock().map_err(|_|"Дождитесь проверки")?;let _gate=state.gate.lock().map_err(|_|"Настройки заняты")?;
         if state.installing.load(Ordering::SeqCst){return Err("Дождитесь обновления приложения".into());}
         let mut saved=plans.undo.lock().map_err(|_|"Возврат недоступен")?;
         let undo=saved.as_ref().ok_or("Прежние настройки недоступны после перезапуска приложения")?;
@@ -700,7 +858,8 @@ pub async fn undo_setup_plan(
         if undo.id!=undo_id||configured(&current)?!=undo.applied||!state.wanted.current(undo.ticket){return Err("После настройки состояние изменилось. Автоматический возврат отменён, чтобы сохранить ваши изменения".into());}
         let undo=saved.take().ok_or("Возврат недоступен")?;drop(saved);
         let active=state.core.lock().map_err(|_|"Нет состояния")?.is_some();let ticket=state.wanted.request()?;
-        let result=transact(&mut Live {state:&state,ticket},&current,&undo.before,active,active,undo.active);
+        let restored=with_observations(&undo.before,&current)?;
+        let result=transact(&mut Live {state:&state,plans:&plans,ticket},&current,&restored,active,active,undo.active);
         state.wanted.finish_current(ticket);
         if state.core.lock().map_err(|_|"Нет состояния подключения")?.is_none(){state.wanted.fail_current(ticket);}
         let _=app.emit("servers-updated",());result
@@ -899,5 +1058,431 @@ mod tests {
         let before = configured(&p).unwrap();
         p.settings.auto_connect = true;
         assert_ne!(configured(&p).unwrap(), before);
+    }
+    fn fixture_profile() -> Profile {
+        let mut p = Profile::default();
+        let server=smart_vpn_engine::servers::Server::parse("vless://11111111-1111-4111-8111-111111111111@127.0.0.1:9?security=none&type=tcp#public-config-test").unwrap();
+        p.selected = Some(server.id.clone());
+        p.servers.push(server);
+        p.subscriptions
+            .push(smart_vpn_engine::settings::Subscription {
+                id: "public-sub".into(),
+                name: "Public".into(),
+                url: "https://example.com/public".into(),
+                updated_at: None,
+                server_count: 1,
+            });
+        p.settings.tun = false;
+        p.settings.kill_switch = false;
+        p.settings.mode = Mode::Direct;
+        p.settings.proxy_acknowledged = true;
+        p.settings.windows_proxy_auto = Some(false);
+        p
+    }
+    fn fixture_state(profile: Profile, path: std::path::PathBuf) -> State {
+        State {
+            installing: Arc::new(AtomicBool::new(false)),
+            profile: Arc::new(Mutex::new(profile)),
+            vault: Arc::new(smart_vpn_engine::settings::Vault::test_fixture(
+                path, [42; 32],
+            )),
+            core: Arc::new(Mutex::new(None)),
+            binary: std::path::PathBuf::from("unused-public-fixture"),
+            status: Arc::new(Mutex::new("disconnected".into())),
+            gate: Arc::new(Mutex::new(())),
+            measurements: Arc::new(Mutex::new(())),
+            proxy_error: Arc::new(Mutex::new(None)),
+            wanted: Arc::new(smart_vpn_engine::lifecycle::ConnectionIntent::default()),
+        }
+    }
+    #[test]
+    fn subscriptions_and_every_user_server_field_invalidate_freshness_and_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = fixture_profile();
+        let state = fixture_state(base.clone(), dir.path().join("profile.enc"));
+        let stamp = ai::stamp(&state).unwrap();
+        let digest = configured(&base).unwrap();
+        let mut variants = vec![];
+        let mut p = base.clone();
+        p.subscriptions[0].url = "https://example.org/new".into();
+        variants.push(p);
+        let mut p = base.clone();
+        p.subscriptions[0].name = "Changed".into();
+        variants.push(p);
+        let mut p = base.clone();
+        p.subscriptions.clear();
+        variants.push(p);
+        let mut p = base.clone();
+        p.servers[0].favorite = true;
+        variants.push(p);
+        let mut p = base.clone();
+        p.servers[0].group = "New group".into();
+        variants.push(p);
+        let mut p = base.clone();
+        p.servers[0].name = "New name".into();
+        variants.push(p);
+        let mut p = base.clone();
+        p.servers[0].subscription = Some("public-sub".into());
+        variants.push(p);
+        let mut p = base.clone();
+        p.servers[0]
+            .params
+            .insert("sni".into(), "example.com".into());
+        variants.push(p);
+        for p in variants {
+            assert_ne!(configured(&p).unwrap(), digest);
+            *state.profile.lock().unwrap() = p;
+            assert!(fresh(
+                "id",
+                "id",
+                &stamp,
+                &ai::stamp(&state).unwrap(),
+                Instant::now()
+            )
+            .is_err());
+        }
+    }
+    #[test]
+    fn apply_and_undo_keep_latest_observations_without_expiring_unchanged_configuration() {
+        let original = fixture_profile();
+        let mut latest = original.clone();
+        latest.servers[0].latency_ms = Some(21);
+        latest.servers[0].download_mbps = Some(12.5);
+        latest.servers[0].successes = 42;
+        latest.servers[0].failures = 2;
+        latest.servers[0].status = "available".into();
+        latest.servers[0].last_error = Some("public observation".into());
+        latest.subscriptions[0].updated_at = Some(123);
+        latest.subscriptions[0].server_count = 4;
+        assert_eq!(configured(&original).unwrap(), configured(&latest).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let state = fixture_state(original.clone(), dir.path().join("profile.enc"));
+        let stamp = ai::stamp(&state).unwrap();
+        *state.profile.lock().unwrap() = latest.clone();
+        assert_eq!(stamp, ai::stamp(&state).unwrap());
+        let mut goal = original.clone();
+        goal.settings.dns_provider = "google".into();
+        let after = with_observations(&goal, &latest).unwrap();
+        assert_eq!(after.settings.dns_provider, "google");
+        assert_eq!(after.servers[0].latency_ms, Some(21));
+        assert_eq!(after.servers[0].successes, 42);
+        assert_eq!(after.subscriptions[0].updated_at, Some(123));
+        let mut newest = after;
+        newest.servers[0].latency_ms = Some(33);
+        newest.subscriptions[0].updated_at = Some(456);
+        let restored = with_observations(&original, &newest).unwrap();
+        assert_eq!(restored.settings.dns_provider, "cloudflare");
+        assert_eq!(restored.servers[0].latency_ms, Some(33));
+        assert_eq!(restored.subscriptions[0].updated_at, Some(456));
+    }
+    #[test]
+    fn rule_preview_exposes_routes_additions_removals_idn_wildcards_and_priority() {
+        let rules = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(d, r)| Rule {
+                    domain: (*d).into(),
+                    route: (*r).into(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = rules(&[
+            ("example.com", "vpn"),
+            ("*.example.ru", "direct"),
+            ("пример.рф", "vpn"),
+        ]);
+        let after = rules(&[
+            ("*.example.ru", "direct"),
+            ("example.com", "direct"),
+            ("new.example.com", "vpn"),
+        ]);
+        let changes = rule_changes(&before, &after).unwrap();
+        assert_eq!(changes.len(), 4);
+        assert_eq!(changes[0].domain, "*.example.ru");
+        assert_eq!(changes[0].previous_position, Some(2));
+        assert_eq!(changes[0].next_position, Some(1));
+        assert_eq!(changes[1].previous_route.as_deref(), Some("vpn"));
+        assert_eq!(changes[1].next_route.as_deref(), Some("direct"));
+        assert!(changes[2].previous_route.is_none());
+        assert!(changes[3].next_route.is_none());
+        assert!(changes[3].domain.starts_with("xn--"));
+        let mut p = fixture_profile();
+        p.rules = rules(&[("example.com", "vpn")]);
+        let options:Options=serde_json::from_value(serde_json::json!({"rules":[{"domain":"example.com","route":"direct"}],"connect_after":false})).unwrap();
+        let (_, view) = build(
+            &p,
+            &super::super::setup_check::private_fixture_report(),
+            &options,
+            false,
+            true,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(view.rule_changes[0].domain, "example.com");
+        assert_eq!(view.rule_changes[0].next_route.as_deref(), Some("direct"));
+        let large = rules(
+            &(0..5000)
+                .map(|_| ("unused.example", "vpn"))
+                .collect::<Vec<_>>(),
+        );
+        let before = large
+            .iter()
+            .enumerate()
+            .map(|(i, r)| Rule {
+                domain: format!("{i}.example.com"),
+                route: r.route.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut after = before.clone();
+        after.reverse();
+        assert_eq!(rule_changes(&before, &after).unwrap().len(), 5000);
+    }
+    #[test]
+    fn preview_reports_actual_scope_and_never_silently_upgrades_or_downgrades_it() {
+        let p = fixture_profile();
+        let report = super::super::setup_check::private_fixture_report();
+        let options: Options = serde_json::from_value(
+            serde_json::json!({"patch":{"mode":"vpn"},"connect_after":false}),
+        )
+        .unwrap();
+        let (after, plan) = build(&p, &report, &options, false, true, false, None).unwrap();
+        assert!(!after.settings.tun);
+        assert!(plan.scope.contains("прокси Mac"));
+        let options: Options = serde_json::from_value(
+            serde_json::json!({"patch":{"mode":"vpn","tun":true},"connect_after":false}),
+        )
+        .unwrap();
+        let (after, plan) = build(&p, &report, &options, false, false, false, None).unwrap();
+        assert!(after.settings.tun);
+        assert!(plan.scope.contains("всего Mac"));
+        assert!(!plan.blockers.is_empty());
+    }
+    #[test]
+    fn cancellation_before_mutation_does_not_change_existing_connection_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = fixture_profile();
+        let state = fixture_state(profile.clone(), dir.path().join("profile.enc"));
+        let ticket = state.wanted.request().unwrap();
+        state.wanted.finish_current(ticket);
+        let plans = Plans::default();
+        let busy = plans.acquire(2, "public-operation").unwrap();
+        plans.request_cancel("public-operation").unwrap();
+        let live = Live {
+            state: &state,
+            plans: &plans,
+            ticket,
+        };
+        assert!(!live.current());
+        assert!(state.wanted.current(ticket));
+        assert!(state.wanted.load(Ordering::SeqCst));
+        drop(busy);
+        assert!(!plans.is_busy());
+        let _busy = plans.acquire(2, "public-operation").unwrap();
+        assert!(!*plans.cancel.lock().unwrap());
+    }
+    struct StoredCore {
+        state: State,
+        plans: Plans,
+        ticket: u64,
+        probe: String,
+    }
+    impl Backend for StoredCore {
+        fn current(&self) -> bool {
+            Live {
+                state: &self.state,
+                plans: &self.plans,
+                ticket: self.ticket,
+            }
+            .current()
+        }
+        fn complete(&mut self) -> Result<(), String> {
+            Live {
+                state: &self.state,
+                plans: &self.plans,
+                ticket: self.ticket,
+            }
+            .complete()
+        }
+        fn save(&mut self, p: &Profile) -> Result<(), String> {
+            Live {
+                state: &self.state,
+                plans: &self.plans,
+                ticket: self.ticket,
+            }
+            .save(p)
+        }
+        fn start(&mut self) -> Result<(), String> {
+            let p = self.state.profile.lock().unwrap().clone();
+            let server = p
+                .servers
+                .iter()
+                .find(|s| Some(&s.id) == p.selected.as_ref())
+                .unwrap();
+            let core = smart_vpn_engine::vpn::CoreProcess::start_on_port(
+                &self.state.binary,
+                server,
+                &p.settings,
+                &p.rules,
+                p.settings.proxy_port,
+            )?;
+            *self.state.core.lock().unwrap() = Some(super::super::ActiveCore::local(core));
+            *self.state.status.lock().unwrap() = "connected".into();
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), String> {
+            let mut owned = self.state.core.lock().unwrap();
+            if let Some(c) = owned.as_mut().and_then(|c| c.local.as_mut()) {
+                c.stop_checked()?;
+            }
+            *owned = None;
+            *self.state.status.lock().unwrap() = "disconnected".into();
+            Ok(())
+        }
+        fn verify(&mut self) -> Result<(), String> {
+            let port = self.state.core.lock().unwrap().as_ref().unwrap().proxy_port;
+            verify_proxy_port(port, &self.probe)
+        }
+    }
+    #[test]
+    fn transaction_with_real_core_and_encrypted_profile_handles_failure_and_preserves_new_data() {
+        let Ok(binary) = std::env::var("SMARTVPN_TEST_CORE") else {
+            return;
+        };
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let http = TcpListener::bind("127.0.0.1:0").unwrap();
+        http.set_nonblocking(true).unwrap();
+        let address = http.local_addr().unwrap();
+        let responder = std::thread::spawn(move || {
+            for status in [204, 503, 204] {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                let mut stream = loop {
+                    match http.accept() {
+                        Ok((s, _)) => break s,
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(10))
+                        }
+                        Err(e) => panic!("public test listener: {e}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = vec![];
+                let mut bytes = [0u8; 1024];
+                while !request.windows(4).any(|s| s == b"\r\n\r\n") {
+                    let count = stream.read(&mut bytes).unwrap();
+                    assert!(count > 0 && request.len() < 8192);
+                    request.extend_from_slice(&bytes[..count]);
+                }
+                assert!(String::from_utf8_lossy(&request).contains("/public-transaction"));
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("vault/profile.enc");
+        let mut p = fixture_profile();
+        p.settings.proxy_port = smart_vpn_engine::vpn::free_port().unwrap();
+        p.servers[0].latency_ms = Some(31);
+        p.subscriptions[0].updated_at = Some(100);
+        let mut state = fixture_state(p.clone(), file.clone());
+        state.binary = binary.into();
+        state.vault.save(&p).unwrap();
+        let ticket = state.wanted.request().unwrap();
+        let mut backend = StoredCore {
+            state,
+            plans: Plans::default(),
+            ticket,
+            probe: format!("http://{address}/public-transaction"),
+        };
+        let mut desired = p.clone();
+        desired.settings.dns_provider = "google".into();
+        let desired = with_observations(&desired, &p).unwrap();
+        transact(&mut backend, &p, &desired, false, false, true).unwrap();
+        assert_eq!(
+            backend.state.vault.load().unwrap().settings.dns_provider,
+            "google"
+        );
+        let before = backend.state.profile.lock().unwrap().clone();
+        let mut failing = before.clone();
+        failing.settings.dns_provider = "quad9".into();
+        assert!(transact(&mut backend, &before, &failing, true, true, true).is_err());
+        let persisted = backend.state.vault.load().unwrap();
+        assert_eq!(persisted.settings.dns_provider, "google");
+        assert_eq!(persisted.servers[0].latency_ms, Some(31));
+        assert!(backend
+            .state
+            .core
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .local
+            .as_mut()
+            .unwrap()
+            .alive());
+        assert!(!std::fs::read(&file)
+            .unwrap()
+            .windows(36)
+            .any(|b| b == b"11111111-1111-4111-8111-111111111111"));
+        let mut current = persisted;
+        current.servers[0].latency_ms = Some(77);
+        current.subscriptions[0].updated_at = Some(200);
+        let restored = with_observations(&p, &current).unwrap();
+        transact(&mut backend, &current, &restored, true, true, false).unwrap();
+        let saved = backend.state.vault.load().unwrap();
+        assert_eq!(saved.settings.dns_provider, "cloudflare");
+        assert_eq!(saved.servers[0].latency_ms, Some(77));
+        assert_eq!(saved.subscriptions[0].updated_at, Some(200));
+        assert!(backend.state.core.lock().unwrap().is_none());
+        responder.join().unwrap();
+    }
+    #[test]
+    fn cancellation_is_rejected_after_the_transaction_commit_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = fixture_state(fixture_profile(), dir.path().join("profile.enc"));
+        let ticket = state.wanted.request().unwrap();
+        let plans = Plans::default();
+        let _busy = plans.acquire(2, "public-operation").unwrap();
+        let mut live = Live {
+            state: &state,
+            plans: &plans,
+            ticket,
+        };
+        live.complete().unwrap();
+        assert!(plans.request_cancel("public-operation").is_err());
+        assert!(!*plans.cancel.lock().unwrap());
+    }
+    #[test]
+    fn poisoned_cancellation_state_releases_the_operation_guard() {
+        let plans = Plans::default();
+        let copy = plans.clone();
+        let _ = std::thread::spawn(move || {
+            let _lock = copy.cancel.lock().unwrap();
+            panic!("public poison fixture");
+        })
+        .join();
+        assert!(plans.acquire(2, "public-operation").is_err());
+        assert!(!plans.is_busy());
+    }
+    #[test]
+    fn a_late_cancel_from_an_older_plan_cannot_cancel_a_newer_operation() {
+        let plans = Plans::default();
+        let old = plans.acquire(2, "older-plan").unwrap();
+        drop(old);
+        let _new = plans.acquire(2, "newer-plan").unwrap();
+        assert!(plans.request_cancel("older-plan").is_err());
+        assert!(!*plans.cancel.lock().unwrap());
+        plans.request_cancel("newer-plan").unwrap();
+        assert!(*plans.cancel.lock().unwrap());
     }
 }

@@ -273,10 +273,7 @@ pub fn stamp(state: &State) -> Result<String, String> {
     let value = serde_json::to_vec(&(
         state.wanted.ticket(),
         status,
-        profile.selected,
-        profile.settings,
-        profile.rules,
-        profile.servers,
+        smart_vpn_engine::settings::configuration_digest(&profile)?,
     ))
     .map_err(|_| "Не удалось проверить актуальность")?;
     Ok(format!("{:x}", Sha256::digest(value)))

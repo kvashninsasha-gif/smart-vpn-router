@@ -148,6 +148,28 @@ impl Profile {
         Ok(())
     }
 }
+/// All persisted user configuration participates in freshness checks. Only
+/// observations updated in the background are excluded, and must be merged
+/// from the latest profile when applying/restoring a configuration.
+pub fn configuration_digest(profile: &Profile) -> Result<String, String> {
+    let mut stable = profile.clone();
+    for server in &mut stable.servers {
+        server.latency_ms = None;
+        server.download_mbps = None;
+        server.status.clear();
+        server.successes = 0;
+        server.failures = 0;
+        server.last_error = None;
+    }
+    for subscription in &mut stable.subscriptions {
+        subscription.updated_at = None;
+        subscription.server_count = 0;
+    }
+    let bytes = serde_json::to_vec(&stable).map_err(|_| crate::text("message_302"))?;
+    use sha2::{Digest, Sha256};
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
@@ -199,6 +221,16 @@ impl Vault {
             service: service.into(),
             path: base.join(service).join("profile.enc"),
             key: SessionKey::default(),
+        }
+    }
+    /// Test-only private storage with a caller-owned temporary path and public
+    /// fixture key. Exercises production encryption/atomic writes, not Keychain.
+    #[cfg(feature = "test-support")]
+    pub fn test_fixture(path: std::path::PathBuf, key: [u8; 32]) -> Self {
+        Self {
+            service: "foxvpn-public-test-fixture".into(),
+            path,
+            key: SessionKey(std::sync::Mutex::new(Some(Zeroizing::new(key)))),
         }
     }
     fn key(&self, create: bool) -> Result<Zeroizing<[u8; 32]>, String> {

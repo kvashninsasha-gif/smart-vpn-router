@@ -5,9 +5,12 @@ resolver = "2"
 
 [package]
 name = "smart-vpn-engine"
-version = "0.1.26"
+version = "0.1.27"
 edition = "2021"
 license = "GPL-3.0-only"
+
+[features]
+test-support = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

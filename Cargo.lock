@@ -3909,7 +3909,7 @@ dependencies = [
 
 [[package]]
 name = "smart-vpn-desktop"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -3939,7 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "smart-vpn-engine"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",

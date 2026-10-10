@@ -1263,6 +1263,7 @@ fn main() {
             setup_plan::prepare_setup_plan,
             setup_plan::apply_setup_plan,
             setup_plan::undo_setup_plan,
+            setup_plan::cancel_setup_plan,
             ai::ai_state,
             ai::ai_download,
             ai::ai_cancel,
