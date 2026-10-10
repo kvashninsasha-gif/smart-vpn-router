@@ -1,0 +1,43 @@
+--- a/apps/desktop/src-tauri/src/setup_plan.rs
++++ b/apps/desktop/src-tauri/src/setup_plan.rs
+@@ -900,4 +900,39 @@
+         p.settings.auto_connect = true;
+         assert_ne!(configured(&p).unwrap(), before);
+     }
+-}
++    fn audit_state(profile: Profile) -> State {
++        State {
++            installing: Arc::new(AtomicBool::new(false)), profile: Arc::new(Mutex::new(profile)),
++            vault: Arc::new(smart_vpn_engine::settings::Vault::new("foxvpn-public-audit-only")),
++            core: Arc::new(Mutex::new(None)), binary: std::path::PathBuf::from("unused-public-fixture"),
++            status: Arc::new(Mutex::new("disconnected".into())),
++            gate: Arc::new(Mutex::new(())), measurements: Arc::new(Mutex::new(())),
++            proxy_error: Arc::new(Mutex::new(None)),
++            wanted: Arc::new(smart_vpn_engine::lifecycle::ConnectionIntent::default()),
++        }
++    }
++    #[test]
++    fn audit_regression_subscription_edit_must_invalidate_prepared_plan() {
++        let state = audit_state(Profile::default()); let before = ai::stamp(&state).unwrap();
++        state.profile.lock().unwrap().subscriptions.push(smart_vpn_engine::settings::Subscription {
++            id:"public-sub".into(), name:"Public fixture".into(), url:"https://example.com/sub".into(),updated_at:None,server_count:0,
++        });
++        assert!(before != ai::stamp(&state).unwrap(), "subscription changes are invisible to plan freshness");
++    }
++    #[test]
++    fn audit_regression_user_favorite_edit_must_invalidate_undo() {
++        let mut profile = Profile::default();
++        profile.servers.push(smart_vpn_engine::servers::Server::parse("vless://11111111-1111-4111-8111-111111111111@example.com:443?security=none&type=tcp#public").unwrap());
++        let before = configured(&profile).unwrap(); profile.servers[0].favorite = true;
++        assert!(before != configured(&profile).unwrap(), "favorite edit is invisible to undo guard");
++    }
++    #[test]
++    fn audit_regression_rule_preview_must_show_domain_and_route() {
++        let mut p = Profile::default(); p.rules = vec![Rule {domain:"example.com".into(),route:"vpn".into()}];
++        let report = super::super::setup_check::private_fixture_report();
++        let options:Options = serde_json::from_value(serde_json::json!({"rules":[{"domain":"example.com","route":"direct"}],"connect_after":false})).unwrap();
++        let (_,plan)=build(&p,&report,&options,false,true,false,None).unwrap();
++        assert!(plan.changes.iter().any(|s| s.contains("example.com") && s.contains("direct")), "rule preview hides changed domain and route");
++    }
++
++}

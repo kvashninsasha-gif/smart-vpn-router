@@ -1,0 +1,14 @@
+2026-10-11; application code 9008e4d, repository 981e0d0.
+Temporary Rust tests called production ai::stamp, configured and build functions.
+No Vault load/save, Keychain access, system proxy change or VPN start/stop.
+
+FAIL audit_regression_subscription_edit_must_invalidate_prepared_plan
+  subscription changes are invisible to plan freshness
+FAIL audit_regression_user_favorite_edit_must_invalidate_undo
+  favorite edit is invisible to undo guard
+FAIL audit_regression_rule_preview_must_show_domain_and_route
+  rule preview hides changed domain and route
+
+Result: 0 passed; 3 failed; exit 101 (expected audit findings).
+Production source restored exactly after execution.
+Patch is stored unapplied as reproducible evidence, not part of released app.
