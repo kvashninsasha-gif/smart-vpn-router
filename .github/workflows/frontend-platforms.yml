@@ -1,0 +1,36 @@
+name: Desktop interface regression on Windows and macOS
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/frontend-platforms.yml'
+      - 'apps/desktop/tests/**'
+      - 'apps/desktop/src/**'
+      - 'apps/desktop/package*.json'
+      - 'apps/desktop/vitest*'
+      - 'apps/desktop/tsconfig*'
+      - 'locales/**'
+permissions:
+  contents: read
+jobs:
+  interface:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+        working-directory: apps/desktop
+      - run: npm test
+        working-directory: apps/desktop
+      - run: npm run build
+        working-directory: apps/desktop

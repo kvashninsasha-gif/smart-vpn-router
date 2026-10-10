@@ -11,6 +11,7 @@ on:
       - 'examples/**'
       - 'locales/**'
       - 'apps/desktop/**'
+      - '!apps/desktop/tests/**'
       - 'scripts/download-core.py'
       - 'scripts/test-windows-proxy-guardian.py'
       - 'scripts/test-windows-installer-update.ps1'

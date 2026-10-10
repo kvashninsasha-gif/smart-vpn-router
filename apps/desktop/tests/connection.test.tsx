@@ -16,6 +16,50 @@ beforeEach(()=>{snapshot=fixture();ipc.listen.mockImplementation(async()=>()=>{}
 afterEach(cleanup);
 async function ready(){render(<App/>);await screen.findByText('Тестовый сервер');}
 describe('connection setup regression',()=>{
+ it('Windows main app exposes local AI without applying its suggested proxy repair',async()=>{
+  snapshot.platform='windows';snapshot.status='connected';snapshot.connection_plan='ready';
+  const original=ipc.invoke.getMockImplementation()!;
+  ipc.invoke.mockImplementation(async(command:string,args:any)=>{
+   if(command==='ai_state')return {model:'Qwen3-0.6B',available:true,phase:'idle',downloaded:639446688,total:639446688};
+   if(command==='setup_check')return {items:[{label:'Прокси Windows',ok:false,message:'Проверка завершена'}],action:'windows_proxy',selected:'test',recommendation:null,tested:0,total:1,changed:false,check_id:'windows-backend-check'};
+   if(command==='ai_explain')return {text:'Параметры прокси требуют проверки.',advice:'Настройте Windows проверенной кнопкой.',elapsed_ms:50};
+   return original(command,args);
+  });
+  await ready();
+  const explain=await screen.findByRole('button',{name:'Объяснить результаты с ИИ'});
+  expect(explain.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(screen.getByRole('button',{name:'Проверить и настроить'}));
+  await waitFor(()=>expect(explain.hasAttribute('disabled')).toBe(false));
+  fireEvent.click(explain);await screen.findByText('Параметры прокси требуют проверки.');
+  expect(ipc.invoke).toHaveBeenCalledWith('ai_explain',{checkId:'windows-backend-check'});
+  expect(ipc.invoke.mock.calls.some(([c])=>['stop','connect','prepare_proxy','install_network_helper'].includes(c))).toBe(false);
+  expect(snapshot.status).toBe('connected');
+  expect(screen.queryByRole('button',{name:'Установить или обновить компонент macOS'})).toBeNull();
+  fireEvent.click(screen.getByRole('button',{name:'Настроить Windows автоматически'}));
+  expect(screen.getByRole('dialog',{name:'Подтверждение настройки'})).toBeTruthy();
+  expect(ipc.invoke.mock.calls.some(([c])=>c==='prepare_proxy')).toBe(false);
+  fireEvent.click(screen.getByRole('button',{name:'Отмена'}));
+  expect(snapshot.status).toBe('connected');
+ });
+ it('Windows main app downloads optional AI only after consent without changing connection settings',async()=>{
+  snapshot.platform='windows';const original=ipc.invoke.getMockImplementation()!;let available=false;
+  ipc.invoke.mockImplementation(async(command:string,args:any)=>{
+   if(command==='ai_state')return {model:'Qwen3-0.6B',available,phase:'idle',downloaded:0,total:639446688};
+   if(command==='ai_download'){available=true;return;}
+   return original(command,args);
+  });
+  await ready();fireEvent.click(await screen.findByRole('button',{name:'Скачать ИИ-помощника'}));
+  expect(screen.getByRole('dialog',{name:'Загрузка ИИ-помощника'})).toBeTruthy();
+  expect(ipc.invoke.mock.calls.some(([c])=>c==='ai_download')).toBe(false);
+  fireEvent.click(screen.getByRole('button',{name:'Не сейчас'}));
+  expect(ipc.invoke.mock.calls.some(([c])=>c==='ai_download')).toBe(false);
+  fireEvent.click(screen.getByRole('button',{name:'Скачать ИИ-помощника'}));
+  fireEvent.click(screen.getByRole('button',{name:'Скачать модель'}));
+  await screen.findByRole('button',{name:'Объяснить результаты с ИИ'});
+  expect(ipc.invoke).toHaveBeenCalledWith('ai_download',{consent:true});
+  expect(ipc.invoke.mock.calls.some(([c])=>['connect','stop','prepare_proxy','save_settings','install_network_helper'].includes(c))).toBe(false);
+  expect(snapshot.status).toBe('disconnected');
+ });
  it('guided connect never toggles a connection that became active after the check',async()=>{
   const original=ipc.invoke.getMockImplementation()!;
   ipc.invoke.mockImplementation(async(command:string,args:any)=>{if(command==='setup_check')return {items:[],action:'connect',selected:'test',recommendation:null,tested:1,total:1,changed:false};return original(command,args)});
