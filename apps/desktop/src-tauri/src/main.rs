@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod ai;
+mod ai_runtime;
 mod diagnostics;
 mod file_actions;
 mod local_recovery;
@@ -929,6 +931,12 @@ fn write_private(path: &std::path::Path, text: &str) -> Result<(), String> {
         .map_err(|_| smart_vpn_engine::text("message_337").into())
 }
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--foxvpn-ai-worker") {
+        if ai_runtime::worker().is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
     #[cfg(target_os = "macos")]
     if let Some(result) = network_cli::run(&std::env::args().nth(1).unwrap_or_default()) {
         match result {
@@ -1025,6 +1033,7 @@ fn main() {
                 *state.status.lock().unwrap() = "unknown".into();
             }
             app.manage(state.clone());
+            app.manage(ai::Assistant::default());
             metrics::start(state.clone(), app.handle().clone());
             let show = MenuItem::with_id(app, "show", t("open_app"), true, None::<&str>)?;
             let connect = MenuItem::with_id(app, "connect", t("connect"), true, None::<&str>)?;
@@ -1243,6 +1252,10 @@ fn main() {
             open_windows_proxy_settings,
             diagnostics::connection_diagnostics,
             setup_check::setup_check,
+            ai::ai_state,
+            ai::ai_download,
+            ai::ai_cancel,
+            ai::ai_explain,
             runtime,
             install_network_helper,
             prepare_tun,
@@ -1313,6 +1326,8 @@ fn main() {
                             handle.exit(0);
                         }
                     });
+                } else {
+                    app.state::<ai::Assistant>().shutdown();
                 }
             }
         });

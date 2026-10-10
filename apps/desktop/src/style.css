@@ -37,3 +37,9 @@
 @media(max-width:1000px){header{padding:0 22px}.breadcrumbs{gap:6px}.header-actions{gap:8px}}
 
 header{position:sticky;top:0;z-index:10}
+
+.local-assistant{margin:22px 0;padding:18px;border:1px solid #dfe5ee;border-radius:14px;background:#f6f8fb}
+.local-assistant h4{margin:0 0 10px}.local-assistant progress{width:100%;accent-color:#b24a1c}
+.ai-answer{margin-top:16px;padding:16px;border-radius:12px;border:1px solid #dfe5ee}.ai-text{white-space:pre-wrap;overflow-wrap:anywhere}
+
+[data-theme=dark] .local-assistant,[data-theme=dark] .ai-answer{background:#15202c;border-color:#46556b}

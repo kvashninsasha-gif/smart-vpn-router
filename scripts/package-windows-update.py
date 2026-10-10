@@ -20,6 +20,13 @@ if proof.get('installer_sha256')!=hashlib.sha256(installer.read_bytes()).hexdige
  raise SystemExit('Startup proof does not match this exact installer/version')
 if len(proof.get('cores',[]))!=1 or len(set(proof['cores'][0].get('cases',[])))!=72 or not proof['cores'][0].get('legacy_rejected'):
  raise SystemExit('Incomplete installed-core startup proof')
+ai_path=installer.parent/'windows-local-ai.json'
+if not ai_path.is_file():raise SystemExit('Installed local AI worker proof is required before signing')
+ai=json.loads(ai_path.read_text(encoding='utf-8'))
+if ai.get('installer_sha256')!=hashlib.sha256(installer.read_bytes()).hexdigest() or ai.get('model_sha256')!='9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031':
+ raise SystemExit('AI proof does not match this installer/pinned model')
+if len(ai.get('inference',[]))!=6 or not all(ai.get(k) for k in ('corrupted_model_rejected','unknown_fields_rejected','oversized_input_rejected','parent_death_cleanup')):
+ raise SystemExit('Incomplete installed local AI worker proof')
 key=Path.home()/'.config/foxvpn-release/updater.key'
 if not key.is_file() or not Path(str(key)+'.pub').is_file() or Path(str(key)+'.pub').read_text().strip()!=config['plugins']['updater']['pubkey']:
  raise SystemExit('Restore the original signing key; never replace it')

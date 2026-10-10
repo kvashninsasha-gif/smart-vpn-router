@@ -21,6 +21,9 @@ jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      LLAMA_STATIC_CRT: "1"
+      RUSTFLAGS: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -30,6 +33,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Locate native AI build tools
+        shell: pwsh
+        run: |
+          $clang = 'C:\Program Files\LLVM\bin'
+          if (!(Test-Path "$clang\libclang.dll")) { throw 'LLVM libclang is required' }
+          "LIBCLANG_PATH=$clang" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          cmake --version
       - name: Download and verify pinned Windows core
         run: python scripts/download-core.py --platform windows-amd64
         env:
@@ -79,3 +89,4 @@ jobs:
             target/release/bundle/nsis/*.exe
             target/release/bundle/nsis/SHA256SUMS.txt
             target/release/bundle/nsis/windows-core-startup.json
+            target/release/bundle/nsis/windows-local-ai.json

@@ -6,8 +6,8 @@ use tauri::Emitter;
 
 #[derive(Serialize)]
 pub struct Item {
-    label: &'static str,
-    ok: bool,
+    pub(crate) label: &'static str,
+    pub(crate) ok: bool,
     message: String,
 }
 #[derive(Serialize)]
@@ -18,13 +18,14 @@ pub struct Candidate {
 }
 #[derive(Serialize)]
 pub struct Report {
-    items: Vec<Item>,
-    action: &'static str,
+    pub(crate) items: Vec<Item>,
+    pub(crate) action: &'static str,
     selected: Option<String>,
-    recommendation: Option<Candidate>,
-    tested: usize,
-    total: usize,
+    pub(crate) recommendation: Option<Candidate>,
+    pub(crate) tested: usize,
+    pub(crate) total: usize,
     changed: bool,
+    pub(crate) check_id: String,
 }
 #[allow(clippy::too_many_arguments)]
 fn action(
@@ -78,6 +79,7 @@ pub async fn setup_check(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _measurement = state.measurements.lock().map_err(|_| "Проверка показателей уже занята")?;
+        let initial_stamp = super::ai::stamp(&state)?;
         let profile = state.profile.lock().map_err(|_| "Не удалось прочитать настройки")?.clone();
         let ticket = state.wanted.ticket();
         let active = state.status.lock().map_err(|_| "Не удалось прочитать состояние")?.as_str() != "disconnected";
@@ -161,7 +163,7 @@ pub async fn setup_check(
         let latest_current = state.core.lock().map_err(|_| "Не удалось прочитать состояние")?
             .as_ref().map(|c| (c.proxy_port, c.secret.clone()));
         let selected_config = |p: &smart_vpn_engine::settings::Profile| p.servers.iter().find(|s| Some(&s.id) == p.selected.as_ref()).and_then(|s| s.uri().ok());
-        let changed = !state.wanted.current(ticket) || latest.selected != profile.selected || latest_current != current
+        let changed = super::ai::stamp(&state)? != initial_stamp || !state.wanted.current(ticket) || latest.selected != profile.selected || latest_current != current
             || selected_config(&latest) != selected_config(&profile)
             || serde_json::to_value(&latest.settings).ok() != serde_json::to_value(&profile.settings).ok()
             || serde_json::to_value(&latest.rules).ok() != serde_json::to_value(&profile.rules).ok();
@@ -174,9 +176,32 @@ pub async fn setup_check(
         let server = latest.servers.iter().any(|s| Some(&s.id) == latest.selected.as_ref());
         let next = if changed { "none" } else { action(core, server, active, profile.settings.tun, helper,
             cfg!(windows), proxy_matches, healthy) };
-        Ok(Report { items, action: next, selected: latest.selected, recommendation, tested,
-            total: profile.servers.len(), changed })
+        let report = Report { items, action: next, selected: latest.selected, recommendation, tested,
+            total: profile.servers.len(), changed, check_id: if changed { String::new() } else { uuid::Uuid::new_v4().to_string() } };
+        if !changed { super::ai::remember(&app, &report, initial_stamp)?; }
+        Ok(report)
     }).await.map_err(|_| "Не удалось завершить проверку")?
+}
+#[cfg(test)]
+pub(crate) fn private_fixture_report() -> Report {
+    Report {
+        items: vec![Item {
+            label: "Компонент VPN",
+            ok: true,
+            message: "PRIVATE_TOKEN PRIVATE_URI".into(),
+        }],
+        action: "connect",
+        selected: Some("PRIVATE_SERVER_ID".into()),
+        recommendation: Some(Candidate {
+            id: "PRIVATE_OTHER_ID".into(),
+            name: "PRIVATE_SERVER_NAME".into(),
+            latency_ms: 99,
+        }),
+        tested: 3,
+        total: 200,
+        changed: false,
+        check_id: "public-check".into(),
+    }
 }
 #[cfg(test)]
 mod tests {

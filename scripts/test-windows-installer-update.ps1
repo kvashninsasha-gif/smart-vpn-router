@@ -46,6 +46,11 @@ try {
     $proof | Add-Member -NotePropertyName installer_sha256 -NotePropertyValue (Get-FileHash $Installer -Algorithm SHA256).Hash.ToLowerInvariant()
     $proof | Add-Member -NotePropertyName installer_version -NotePropertyValue $ExpectedVersion
     $proof | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 $report
+    $model = Join-Path $repoRoot 'target/ai-test/Qwen3-0.6B-Q8_0.gguf'
+    $aiReport = Join-Path (Split-Path (Resolve-Path $Installer).Path -Parent) 'windows-local-ai.json'
+    python (Join-Path $PSScriptRoot 'test-local-ai.py') $exe --model $model --report $aiReport --installer $Installer
+    if ($LASTEXITCODE -ne 0) { throw 'Installed local AI worker gate failed' }
+    if ((Get-FileHash $profile -Algorithm SHA256).Hash -ne $profileHash) { throw 'AI worker changed the profile' }
     Write-Output 'NSIS update mode and profile preservation verified'
 } finally {
     $uninstaller = Join-Path $installRoot 'uninstall.exe'
